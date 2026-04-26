@@ -1,15 +1,18 @@
 package your.package.discovery
 
 import android.os.RemoteCallbackList
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+
+private const val TAG = "DiscoveryDeviceAidlBinder"
 
 class DiscoveryDeviceRepositoryAidlBinder(
     private val scope: CoroutineScope,
     private val resource: DiscoveryDeviceResource,
     private val isSameDevice: (DiscoveryDevice, DiscoveryDevice) -> Boolean = { previous, current ->
-        previous == current
+        DiscoveryDeviceIdentity.isSameDevice(previous, current)
     },
     private val hasSameContent: (DiscoveryDevice, DiscoveryDevice) -> Boolean = { previous, current ->
         previous == current
@@ -55,7 +58,11 @@ class DiscoveryDeviceRepositoryAidlBinder(
 
             collectJob = scope.launch {
                 resource.deviceListFlow.collect { devices ->
-                    publish(devices)
+                    runCatching {
+                        publish(devices)
+                    }.onFailure { throwable ->
+                        Log.w(TAG, "Failed to publish discovery devices.", throwable)
+                    }
                 }
             }
 
@@ -79,11 +86,14 @@ class DiscoveryDeviceRepositoryAidlBinder(
             return
         }
 
-        createChanges(
-            previous = latestDevices,
-            current = devices,
-        ).forEach(::broadcastChange)
-
+        runCatching {
+            createChanges(
+                previous = latestDevices,
+                current = devices,
+            ).forEach(::broadcastChange)
+        }.onFailure { throwable ->
+            Log.w(TAG, "Failed to create discovery device changes.", throwable)
+        }
         latestDevices = devices
     }
 

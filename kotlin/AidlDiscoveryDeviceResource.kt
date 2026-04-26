@@ -1,9 +1,12 @@
 package your.package.discovery
 
+import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+
+private const val TAG = "AidlDiscoveryDeviceResource"
 
 class AidlDiscoveryDeviceResource(
     scope: CoroutineScope,
@@ -23,11 +26,19 @@ class AidlDiscoveryDeviceResource(
 
         val callback = object : IDiscoveryDeviceRepositoryCallback.Stub() {
             override fun onInitialDevices(devices: MutableList<DiscoveryDevice>?) {
-                deferred.complete(devices.orEmpty())
+                runCatching {
+                    deferred.complete(devices.orEmpty())
+                }.onFailure { throwable ->
+                    Log.w(TAG, "Failed to deliver initial devices from AIDL callback.", throwable)
+                }
             }
 
             override fun onChanged(change: DiscoveryDeviceAidlChange) {
-                listener.onChanged(change.toDomain())
+                runCatching {
+                    listener.onChanged(change.toDomain())
+                }.onFailure { throwable ->
+                    Log.w(TAG, "Failed to deliver discovery change from AIDL callback.", throwable)
+                }
             }
         }
 
@@ -58,6 +69,8 @@ class AidlDiscoveryDeviceResource(
         if (remote != null && callback != null) {
             runCatching {
                 remote.unregisterCallback(callback)
+            }.onFailure { throwable ->
+                Log.w(TAG, "Failed to unregister AIDL discovery callback.", throwable)
             }
         }
     }

@@ -1,5 +1,6 @@
 package your.package.discovery
 
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -7,6 +8,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.shareIn
+
+private const val TAG = "DiscoveryDeviceResource"
 
 abstract class DiscoveryDeviceResource(
     scope: CoroutineScope,
@@ -24,24 +27,30 @@ abstract class DiscoveryDeviceResource(
 
     private fun createDeviceListFlow(): Flow<List<DiscoveryDevice>> =
         callbackFlow {
-            val deviceStore = DeviceStore()
+            val deviceStore = DiscoveryDeviceStore()
             val emitDevices: (List<DiscoveryDevice>) -> Unit = { devices ->
-                trySend(devices)
+                runCatching { trySend(devices) }
             }
             val listener = createChangeListener(
                 deviceStore = deviceStore,
                 emitDevices = emitDevices,
             )
 
-            try {
-                registerListener(listener)
-                emitInitialDevices(
-                    deviceStore = deviceStore,
-                    emitDevices = emitDevices,
-                )
-            } catch (throwable: Throwable) {
-                cleanup(listener, deviceStore)
-                throw throwable
+            val started =
+                runCatching {
+                    registerListener(listener)
+                    emitInitialDevices(
+                        deviceStore = deviceStore,
+                        emitDevices = emitDevices,
+                    )
+                }.onFailure { throwable ->
+                    Log.w(TAG, "Failed to start discovery device flow.", throwable)
+                    cleanup(listener, deviceStore)
+                    close()
+                }.isSuccess
+
+            if (!started) {
+                return@callbackFlow
             }
 
             awaitClose {
@@ -50,18 +59,21 @@ abstract class DiscoveryDeviceResource(
         }
 
     private fun createChangeListener(
-        deviceStore: DeviceStore,
+        deviceStore: DiscoveryDeviceStore,
         emitDevices: (List<DiscoveryDevice>) -> Unit,
     ): DiscoveryDeviceChangeListener =
         object : DiscoveryDeviceChangeListener {
             override fun onChanged(change: DiscoveryDeviceChange) {
-                val devices = deviceStore.applyChange(change) ?: return
-                emitDevices(devices)
+                runCatching {
+                    deviceStore.applyChange(change)
+                }.onFailure { throwable ->
+                    Log.w(TAG, "Failed to apply discovery device change.", throwable)
+                }.getOrNull()?.let(emitDevices)
             }
         }
 
     private suspend fun emitInitialDevices(
-        deviceStore: DeviceStore,
+        deviceStore: DiscoveryDeviceStore,
         emitDevices: (List<DiscoveryDevice>) -> Unit,
     ) {
         val initialDevices = getInitialDevices()
@@ -71,9 +83,13 @@ abstract class DiscoveryDeviceResource(
 
     private fun cleanup(
         listener: DiscoveryDeviceChangeListener,
-        deviceStore: DeviceStore,
+        deviceStore: DiscoveryDeviceStore,
     ) {
-        runCatching { unregisterListener(listener) }
+        runCatching {
+            unregisterListener(listener)
+        }.onFailure { throwable ->
+            Log.w(TAG, "Failed to unregister discovery listener.", throwable)
+        }
         deviceStore.clear()
     }
 
@@ -86,73 +102,4 @@ abstract class DiscoveryDeviceResource(
     protected abstract fun unregisterListener(
         listener: DiscoveryDeviceChangeListener,
     )
-
-    private class DeviceStore {
-        private val lock = Any()
-        private val devices = mutableListOf<DiscoveryDevice>()
-        private val pendingChanges = mutableListOf<DiscoveryDeviceChange>()
-
-        private var initialDevicesApplied = false
-
-        fun applyInitialDevices(
-            initialDevices: List<DiscoveryDevice>,
-        ): List<DiscoveryDevice> =
-            synchronized(lock) {
-                devices.clear()
-                initialDevices.forEach(::upsertLocked)
-
-                pendingChanges.forEach(::applyChangeLocked)
-                pendingChanges.clear()
-
-                initialDevicesApplied = true
-                currentDevicesLocked()
-            }
-
-        fun applyChange(
-            change: DiscoveryDeviceChange,
-        ): List<DiscoveryDevice>? =
-            synchronized(lock) {
-                if (!initialDevicesApplied) {
-                    pendingChanges += change
-                    return@synchronized null
-                }
-
-                val changed = applyChangeLocked(change)
-                if (changed) currentDevicesLocked() else null
-            }
-
-        fun clear() {
-            synchronized(lock) {
-                devices.clear()
-                pendingChanges.clear()
-                initialDevicesApplied = false
-            }
-        }
-
-        private fun applyChangeLocked(change: DiscoveryDeviceChange): Boolean =
-            when (change.type) {
-                DiscoveryDeviceChange.Type.ADDED,
-                DiscoveryDeviceChange.Type.UPDATED -> {
-                    upsertLocked(change.device)
-                    true
-                }
-
-                DiscoveryDeviceChange.Type.REMOVED -> {
-                    devices.remove(change.device)
-                }
-            }
-
-        private fun upsertLocked(device: DiscoveryDevice) {
-            val index = devices.indexOf(device)
-
-            if (index >= 0) {
-                devices[index] = device
-            } else {
-                devices += device
-            }
-        }
-
-        private fun currentDevicesLocked(): List<DiscoveryDevice> =
-            devices.toList()
-    }
 }
